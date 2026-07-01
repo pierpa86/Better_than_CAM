@@ -1,0 +1,29 @@
+[project]
+name = "BTCAM"
+version = "0.1.0"
+description = "Better than CAM for NZXT Kraken LCD control"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "HardwareMonitor>=1.2.1; platform_system == 'Windows'",
+  "liquidctl>=1.16.0",
+  "Pillow>=10.0.0",
+  "psutil>=5.9.0",
+  "pystray>=0.19.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pyinstaller>=6.0.0",
+]
+
+[project.scripts]
+btcam = "BTCAM.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

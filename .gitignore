@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+tests/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Local runtime output
+captures/
+capture_cam_usb.ps1
+run.ps1
+*.pcapng
+*.log
+*.out.txt
+*.err.txt
+preview*.png
+kraken-lcd*.png
+
+# Local agent/session files
+.agents/
+.codex/
+SESSION_SUMMARY.md
+SESSION_RESUME.txt
+
+# Editor/OS noise
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

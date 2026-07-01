@@ -1,0 +1,5 @@
+HardwareMonitor>=1.2.1; platform_system == "Windows"
+liquidctl>=1.16.0
+Pillow>=10.0.0
+psutil>=5.9.0
+pystray>=0.19.5
