@@ -35,11 +35,13 @@ from .gif_editor import (
     sanitize_gif_stem,
     save_cropped_gif,
     save_lcd_ready_gif,
+    thin_gif_frames,
 )
 from .giphy_client import GiphyCategory, GiphyGif, download_giphy_file, giphy_categories, search_giphy, trending_giphy
 from .liquidctl_client import LcdImageTransferError, LiquidctlClient, LiquidctlError
 from .media_library import btcam_documents_dir, copy_gif_to_media_library
 from .models import CoolerStatus, StatusSnapshot, SystemStatus
+from .pawnio_installer import install_pawnio_silently, is_pawnio_installed
 from .renderer import (
     DEFAULT_CENTER_GAUGE_LAYOUT,
     DEFAULT_DETAILED_TEMPERATURE_LAYOUT,
@@ -193,6 +195,7 @@ class BTCAMApp(tk.Tk):
         self.temperature_editor_window: tk.Toplevel | None = None
         self.temperature_editor_preview_image: ImageTk.PhotoImage | None = None
         self.giphy_window: tk.Toplevel | None = None
+        self.gif_crop_editor_window: tk.Toplevel | None = None
         self.giphy_result_images: list[ImageTk.PhotoImage] = []
         self.giphy_preview_tiles: list[_AnimatedPreviewTile] = []
         self.giphy_crop_preview_image: ImageTk.PhotoImage | None = None
@@ -509,6 +512,46 @@ class BTCAMApp(tk.Tk):
             text="Minimize to tray",
             variable=tray_close_var,
         ).pack(anchor="w", pady=(10, 0))
+
+        pawnio_row = ttk.Frame(panel, style="Panel.TFrame")
+        pawnio_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(pawnio_row, text="PawnIO", style="Panel.TLabel").pack(side="left")
+        pawnio_status_var = tk.StringVar(window, value="")
+        ttk.Label(pawnio_row, textvariable=pawnio_status_var, style="Panel.TLabel").pack(side="left", padx=(8, 0))
+        pawnio_install_button = ttk.Button(pawnio_row, text="Installa", style="Accent.TButton")
+        pawnio_install_button.pack(side="right")
+
+        def refresh_pawnio_status() -> None:
+            if is_pawnio_installed():
+                pawnio_status_var.set("Installed")
+                pawnio_install_button.pack_forget()
+            else:
+                pawnio_status_var.set("Not installed")
+                pawnio_install_button.pack(side="right")
+
+        def install_pawnio() -> None:
+            pawnio_install_button.state(["disabled"])
+            pawnio_status_var.set("Installing...")
+
+            def worker() -> None:
+                success = install_pawnio_silently()
+
+                def done() -> None:
+                    pawnio_install_button.state(["!disabled"])
+                    if not success:
+                        messagebox.showerror(
+                            "PawnIO",
+                            "PawnIO installation failed. Install it manually from https://pawnio.eu",
+                        )
+                    refresh_pawnio_status()
+
+                window.after(0, done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        pawnio_install_button.configure(command=install_pawnio)
+        refresh_pawnio_status()
+
         ttk.Label(panel, text="GIPHY API key", style="Panel.TLabel").pack(anchor="w", pady=(16, 0))
         giphy_entry = tk.Entry(
             panel,
@@ -1150,7 +1193,13 @@ class BTCAMApp(tk.Tk):
             copied_path = self._copy_selected_gif(path)
             if copied_path is None:
                 return
-            self.carousel_items.append({"type": GIF_ITEM, "path": copied_path})
+            fits, reduced = self._ensure_native_gif_fits(copied_path)
+            if not fits:
+                return
+            new_item = {"type": GIF_ITEM, "path": copied_path}
+            if reduced:
+                new_item["reduced"] = True
+            self.carousel_items.append(new_item)
             self._refresh_carousel_view(select_index=len(self.carousel_items) - 1)
 
     def _add_giphy_item(self) -> None:
@@ -1401,6 +1450,11 @@ class BTCAMApp(tk.Tk):
             load_results(str(state["query"]), next_offset, str(state["mode"]))
 
         def download_for_crop(result: GiphyGif) -> None:
+            if self.gif_crop_editor_window is not None and self.gif_crop_editor_window.winfo_exists():
+                self.gif_crop_editor_window.lift()
+                self.gif_crop_editor_window.focus_force()
+                status_var.set("Finish editing the current GIF before selecting another one.")
+                return
             status_var.set(f"Downloading {result.title or 'GIF'}...")
 
             def worker() -> None:
@@ -1438,7 +1492,13 @@ class BTCAMApp(tk.Tk):
             status_var.set("Set the GIPHY API key in Options, then open Categories or Search.")
 
     def _open_gif_crop_editor(self, source_path: Path, title: str, on_done: Any) -> None:
+        if self.gif_crop_editor_window is not None and self.gif_crop_editor_window.winfo_exists():
+            self.gif_crop_editor_window.lift()
+            self.gif_crop_editor_window.focus_force()
+            return
+
         window = tk.Toplevel(self)
+        self.gif_crop_editor_window = window
         window.title("Edit GIF")
         window.configure(bg="#12181c")
         window.resizable(False, False)
@@ -1515,6 +1575,7 @@ class BTCAMApp(tk.Tk):
 
         def close_crop_editor() -> None:
             stop_preview_animation()
+            self.gif_crop_editor_window = None
             window.destroy()
 
         def start_drag(event: tk.Event) -> None:
@@ -1560,7 +1621,13 @@ class BTCAMApp(tk.Tk):
             except (OSError, ValueError) as exc:
                 messagebox.showerror("Giphy", f"Unable to save GIF:\n{exc}")
                 return
-            self.carousel_items.append({"type": GIF_ITEM, "path": str(copied_path)})
+            fits, reduced = self._ensure_native_gif_fits(copied_path)
+            if not fits:
+                return
+            new_item = {"type": GIF_ITEM, "path": str(copied_path)}
+            if reduced:
+                new_item["reduced"] = True
+            self.carousel_items.append(new_item)
             self._refresh_carousel_view(select_index=len(self.carousel_items) - 1)
             ratio = final_size_bytes / source_size_bytes if source_size_bytes else 0
             self.status_var.set(
@@ -1581,21 +1648,23 @@ class BTCAMApp(tk.Tk):
         update_preview()
         schedule_preview_frame()
 
-    def _replace_gif_item(self, index: int) -> None:
+    def _reduce_gif_item(self, index: int) -> None:
         if not self._require_carousel_stopped():
             return
         if index < 0 or index >= len(self.carousel_items):
             return
-        path = filedialog.askopenfilename(
-            title="Choose carousel GIF",
-            filetypes=(("GIF", "*.gif"), ("All files", "*.*")),
-        )
-        if path:
-            copied_path = self._copy_selected_gif(path)
-            if copied_path is None:
-                return
-            self.carousel_items[index] = {"type": GIF_ITEM, "path": copied_path}
-            self._refresh_carousel_view(select_index=index)
+        item = self.carousel_items[index]
+        if item.get("type") != GIF_ITEM or item.get("reduced"):
+            return
+        path = Path(item["path"])
+        try:
+            thin_gif_frames(path)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Carousel", f"Unable to reduce GIF:\n{exc}")
+            return
+        item["reduced"] = True
+        self._refresh_carousel_view(select_index=index)
+        self.status_var.set(f"GIF frames reduced for {path.name}.")
 
     def _copy_selected_gif(self, path: str) -> str | None:
         try:
@@ -1617,6 +1686,91 @@ class BTCAMApp(tk.Tk):
                 f"{copied_path.parent}. Size: {_format_file_size(source_size_bytes)} -> {_format_file_size(final_size_bytes)} ({ratio:.1f}x)."
             )
         return str(copied_path)
+
+    def _ensure_native_gif_fits(self, path: str | Path, exclude_index: int | None = None) -> tuple[bool, bool]:
+        """Returns (fits, reduced): whether the GIF fits the carousel budget, and whether frames were cut to make it fit."""
+        path = Path(path)
+        display_size = self.config_model.display_size
+        orientation = self.config_model.orientation
+
+        def candidate_items() -> list[dict[str, str]]:
+            items = [
+                item
+                for index, item in enumerate(self.carousel_items)
+                if item.get("type") == GIF_ITEM and index != exclude_index
+            ]
+            items.append({"type": GIF_ITEM, "path": str(path)})
+            return items
+
+        def total_blocks() -> int:
+            requirements = _native_carousel_requirements(candidate_items(), display_size, orientation)
+            return sum(int(requirement["blocks"]) for requirement in requirements)
+
+        blocks = total_blocks()
+        if blocks <= KRAKEN_NATIVE_BUCKET_MEMORY_BLOCKS:
+            return True, False
+
+        if not self._ask_reduce_gif_frames(blocks):
+            return False, False
+
+        while blocks > KRAKEN_NATIVE_BUCKET_MEMORY_BLOCKS:
+            try:
+                thin_gif_frames(path)
+            except ValueError:
+                messagebox.showerror(
+                    "Carousel",
+                    "This GIF cannot be reduced further and still does not fit in the Kraken's "
+                    "LCD memory together with the rest of the carousel.",
+                )
+                return False, False
+            blocks = total_blocks()
+
+        self.status_var.set(
+            f"GIF frames reduced to fit Kraken LCD memory ({blocks:,}/{KRAKEN_NATIVE_BUCKET_MEMORY_BLOCKS:,} blocks)."
+        )
+        return True, True
+
+    def _ask_reduce_gif_frames(self, blocks: int) -> bool:
+        window = tk.Toplevel(self)
+        window.title("GIF too large")
+        window.configure(bg="#12181c")
+        window.resizable(False, False)
+        window.transient(self)
+
+        panel = ttk.Frame(window, style="Panel.TFrame", padding=16)
+        panel.pack(fill="both", expand=True, padx=14, pady=14)
+
+        ttk.Label(panel, text="GIF too large", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w")
+        message = (
+            f"This carousel needs {blocks:,} blocks but the Kraken LCD only has "
+            f"{KRAKEN_NATIVE_BUCKET_MEMORY_BLOCKS:,} blocks of memory.\n\n"
+            "Reduce the GIF's frame count to make it fit, or cancel and edit it manually."
+        )
+        ttk.Label(panel, text=message, style="Panel.TLabel", wraplength=340, justify="left").pack(
+            anchor="w", pady=(10, 0)
+        )
+
+        choice = {"reduce": False}
+
+        def on_reduce() -> None:
+            choice["reduce"] = True
+            window.destroy()
+
+        def on_cancel() -> None:
+            choice["reduce"] = False
+            window.destroy()
+
+        buttons = ttk.Frame(panel, style="Panel.TFrame")
+        buttons.pack(fill="x", pady=(16, 0))
+        ttk.Button(buttons, text="Cancel", command=on_cancel).pack(side="right")
+        ttk.Button(buttons, text="Reduce frames", style="Accent.TButton", command=on_reduce).pack(
+            side="right", padx=(0, 8)
+        )
+
+        window.protocol("WM_DELETE_WINDOW", on_cancel)
+        window.grab_set()
+        window.wait_window()
+        return choice["reduce"]
 
     def _remove_carousel_item(self, index: int | None = None) -> None:
         if not self._require_carousel_stopped():
@@ -1737,7 +1891,11 @@ class BTCAMApp(tk.Tk):
         item = self.carousel_items[index]
         menu = tk.Menu(self, tearoff=0)
         if item.get("type") == GIF_ITEM:
-            menu.add_command(label="Change GIF", command=lambda: self._replace_gif_item(index))
+            menu.add_command(
+                label="Reduce GIF",
+                command=lambda: self._reduce_gif_item(index),
+                state="disabled" if item.get("reduced") else "normal",
+            )
             menu.add_separator()
         menu.add_command(label="Remove", command=lambda: self._remove_carousel_item(index))
         menu.tk_popup(event.x_root, event.y_root)
@@ -1963,6 +2121,9 @@ class BTCAMApp(tk.Tk):
         if self.temperature_editor_window is not None and self.temperature_editor_window.winfo_exists():
             self.temperature_editor_window.destroy()
             self.temperature_editor_window = None
+        if self.gif_crop_editor_window is not None and self.gif_crop_editor_window.winfo_exists():
+            self.gif_crop_editor_window.destroy()
+            self.gif_crop_editor_window = None
         self.destroy()
 
     def _validate_carousel_settings(self) -> bool:

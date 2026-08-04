@@ -92,7 +92,12 @@ dist\BTCAM.exe
 ```
 
 The executable includes the `btcam.ico` icon and the required modules for
-liquidctl, HardwareMonitor, and WinUSB.
+liquidctl, HardwareMonitor, and WinUSB. It also bundles the `PawnIO_setup.exe`
+driver installer that `HardwareMonitor`/LibreHardwareMonitorLib needs for
+CPU/GPU temperature sensors. PawnIO is not installed automatically; use the
+"Installa" button next to "PawnIO" in the Options window (below "Minimize to
+tray") to install it silently (`-install -silent`) when it is not already
+present.
 
 ## Hardware Diagnostics
 
@@ -113,8 +118,13 @@ If `Cannot find bulk out device` appears:
 
 If the CPU temperature does not appear:
 
-- Run the app as administrator.
+- Run the app as administrator (required for the PawnIO driver install and for
+  hardware sensor access).
+- Open Options and click "Installa" next to "PawnIO" if it shows "Not
+  installed".
 - Run `python -m BTCAM.cli sensor-debug`.
+- If the button reports a failed install (e.g. blocked by policy), install
+  PawnIO manually from https://pawnio.eu and relaunch BTCAM.
 - If no reliable CPU reading appears, the app leaves the value unavailable
   instead of showing an invented temperature.
 

@@ -42,7 +42,10 @@ def normalize_carousel_items(items: object) -> list[dict[str, str]]:
         elif item_type == GIF_ITEM:
             path = str(item.get("path") or "").strip()
             if path:
-                normalized.append({"type": GIF_ITEM, "path": path})
+                normalized_item = {"type": GIF_ITEM, "path": path}
+                if item.get("reduced"):
+                    normalized_item["reduced"] = True
+                normalized.append(normalized_item)
     return normalized
 
 

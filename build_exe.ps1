@@ -8,6 +8,8 @@ $Venv = Join-Path $Root ".venv"
 $Python = Join-Path $Venv "Scripts\python.exe"
 $Icon = Join-Path $Root "btcam.ico"
 $IconData = "$Icon;."
+$PawnIoInstaller = Join-Path $Root "PawnIO_setup.exe"
+$PawnIoData = "$PawnIoInstaller;."
 
 function Test-VenvPython {
     param([string]$Path)
@@ -50,6 +52,10 @@ if (-not (Test-Path -LiteralPath $Icon)) {
     throw "Icona non trovata: $Icon"
 }
 
+if (-not (Test-Path -LiteralPath $PawnIoInstaller)) {
+    throw "Installer PawnIO non trovato: $PawnIoInstaller"
+}
+
 & $Python -m PyInstaller `
     --noconfirm `
     --clean `
@@ -59,6 +65,7 @@ if (-not (Test-Path -LiteralPath $Icon)) {
     --uac-admin `
     --icon $Icon `
     --add-data $IconData `
+    --add-data $PawnIoData `
     --name BTCAM `
     --specpath (Join-Path $Root "build") `
     --paths (Join-Path $Root "src") `

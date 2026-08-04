@@ -132,6 +132,40 @@ def save_lcd_ready_gif(
     return output_path
 
 
+def thin_gif_frames(path: str | Path, keep_step: int = 2, palette_colors: int = 96) -> Path:
+    path = Path(path)
+
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+    with Image.open(path) as source:
+        if source.format != "GIF":
+            raise ValueError("the selected file is not a GIF")
+        for index, frame in enumerate(ImageSequence.Iterator(source)):
+            duration = int(frame.info.get("duration") or source.info.get("duration") or 100)
+            if index % keep_step != 0:
+                continue
+            frames.append(frame.convert("RGBA").copy())
+            durations.append(duration * keep_step)
+
+    if len(frames) < 2:
+        raise ValueError("the GIF has too few frames left to reduce further")
+
+    colors = max(2, min(256, int(palette_colors)))
+    frames = [frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=colors) for frame in frames]
+    frames[0].save(
+        path,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=0,
+        disposal=1,
+        optimize=True,
+        interlace=False,
+    )
+    return path
+
+
 def render_fitted_gif_frame(
     frame: Image.Image,
     output_size: int,
