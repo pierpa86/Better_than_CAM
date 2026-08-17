@@ -4,6 +4,7 @@ import contextlib
 import io
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -25,8 +26,14 @@ class SystemSensorReader:
     def __init__(self, temp_cache_seconds: float = 1.0) -> None:
         self._temps = _CachedTemps()
         self._temp_cache_seconds = temp_cache_seconds
+        self._hardware_monitor_computer: Any | None = None
+        self._hardware_monitor_lock = threading.RLock()
 
     def read(self) -> SystemStatus:
+        with self._hardware_monitor_lock:
+            return self._read_locked()
+
+    def _read_locked(self) -> SystemStatus:
         now = time.monotonic()
         cpu_load = psutil.cpu_percent(interval=None)
         memory = psutil.virtual_memory().percent
@@ -88,45 +95,78 @@ class SystemSensorReader:
         return _pick_temperature(rows, "cpu"), _pick_temperature(rows, "gpu")
 
     def _read_hardware_monitor_internal_rows(self) -> list[dict[str, Any]]:
-        buffer = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                from HardwareMonitor.Hardware import Computer
-        except (ImportError, OSError, RuntimeError):
-            return []
+        with self._hardware_monitor_lock:
+            return self._read_hardware_monitor_internal_rows_locked()
+
+    def _read_hardware_monitor_internal_rows_locked(self) -> list[dict[str, Any]]:
+        if self._hardware_monitor_computer is None:
+            try:
+                self._hardware_monitor_computer = _open_hardware_monitor_computer()
+            except Exception:
+                return []
 
         rows: list[dict[str, Any]] = []
-        computer = Computer()
-        for attr in (
-            "IsCpuEnabled",
-            "IsGpuEnabled",
-            "IsMotherboardEnabled",
-            "IsControllerEnabled",
-            "IsMemoryEnabled",
-            "IsStorageEnabled",
-        ):
-            setattr(computer, attr, True)
-
         try:
-            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                computer.Open()
-                for hardware in computer.Hardware:
-                    _update_hardware(hardware)
-                    _collect_internal_temperatures(hardware, rows)
+            for hardware in self._hardware_monitor_computer.Hardware:
+                _update_hardware(hardware)
+                _collect_internal_temperatures(hardware, rows)
         except Exception:
+            self.close()
             return []
-        finally:
-            try:
-                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                    computer.Close()
-            except Exception:
-                pass
 
         return rows
+
+    def close(self) -> None:
+        with self._hardware_monitor_lock:
+            self._close_hardware_monitor_locked()
+
+    def _close_hardware_monitor_locked(self) -> None:
+        computer = self._hardware_monitor_computer
+        self._hardware_monitor_computer = None
+        if computer is None:
+            return
+
+        buffer = io.StringIO()
+        with contextlib.suppress(Exception):
+            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                computer.Close()
+
+    def __enter__(self) -> SystemSensorReader:
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
     def debug_temperatures(self) -> dict[str, Any]:
         rows = self._read_hardware_monitor_internal_rows()
         return {"sources": [_debug_source("internal", rows)]}
+
+
+def _open_hardware_monitor_computer() -> Any:
+    buffer = io.StringIO()
+    computer: Any | None = None
+    try:
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            from HardwareMonitor.Hardware import Computer
+
+            computer = Computer()
+            for attr in (
+                "IsCpuEnabled",
+                "IsGpuEnabled",
+                "IsMotherboardEnabled",
+                "IsControllerEnabled",
+                "IsMemoryEnabled",
+                "IsStorageEnabled",
+            ):
+                setattr(computer, attr, True)
+            computer.Open()
+    except Exception:
+        if computer is not None:
+            with contextlib.suppress(Exception):
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    computer.Close()
+        raise
+    return computer
 
 
 def _fill_missing_temperatures(

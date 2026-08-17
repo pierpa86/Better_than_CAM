@@ -71,22 +71,47 @@ def _status_from_devices(devices: list[dict[str, Any]]) -> CoolerStatus:
     return status
 
 
+def _device_status_payload(device: Any, status_items: Any) -> dict[str, Any]:
+    return {
+        "description": str(device.description),
+        "status": [
+            {"key": key, "value": value, "unit": unit}
+            for key, value, unit in (status_items or [])
+        ],
+    }
+
+
 class LiquidctlClient:
     def __init__(self, executable: str = "liquidctl", match: str = "kraken", timeout: int = 30) -> None:
         self.executable = executable
         self.match = match
         self.timeout = timeout
+        self._embedded_device: Any | None = None
 
     def list_devices(self) -> list[dict[str, Any]]:
         return self._run_json(["list", "--json"])
 
     def initialize(self) -> list[dict[str, Any]] | None:
+        if self._should_run_embedded():
+            payload = self._run_with_device(
+                lambda device: _device_status_payload(device, device.initialize())
+            )
+            return [payload]
+
         out = self._run(["initialize", "all", "--json"])
         if not out.strip():
             return None
         return json.loads(out)
 
     def status(self) -> CoolerStatus:
+        if self._should_run_embedded():
+            try:
+                return self._read_embedded_status()
+            except LiquidctlError as exc:
+                if not _is_transient_lcd_error(str(exc)):
+                    raise
+                time.sleep(0.8)
+                return self._read_embedded_status()
         return _status_from_devices(self._run_json_retry(["status", "--json"]))
 
     def status_if_idle(self) -> CoolerStatus | None:
@@ -102,36 +127,36 @@ class LiquidctlClient:
             _EMBEDDED_LIQUIDCTL_LOCK.release()
 
     def set_lcd_static(self, image_path: str | Path) -> None:
-        args = ["set", "lcd", "screen", "static", str(image_path)]
+        image_path = str(image_path)
         try:
-            self._run(args)
+            self._set_lcd_screen("static", image_path)
         except LiquidctlError as exc:
             if not _is_transient_lcd_error(str(exc)):
                 raise
             time.sleep(0.8)
-            self._run(args)
+            self._set_lcd_screen("static", image_path)
 
     def set_lcd_gif(self, image_path: str | Path) -> None:
-        args = ["set", "lcd", "screen", "gif", str(image_path)]
+        image_path = str(image_path)
         try:
-            self._run(args)
+            self._set_lcd_screen("gif", image_path)
         except LiquidctlError as exc:
             if not _is_transient_lcd_error(str(exc)):
                 raise
             time.sleep(0.8)
-            self._run(args)
+            self._set_lcd_screen("gif", image_path)
 
     def set_lcd_liquid(self) -> None:
-        self._run(["set", "lcd", "screen", "liquid"])
+        self._set_lcd_screen("liquid")
 
     def set_lcd_brightness(self, value: int) -> None:
         value = max(0, min(100, int(value)))
-        self._run(["set", "lcd", "screen", "brightness", str(value)])
+        self._set_lcd_screen("brightness", value)
 
     def set_lcd_orientation(self, degrees: int) -> None:
         if degrees not in {0, 90, 180, 270}:
             raise ValueError("Orientation must be 0, 90, 180 or 270.")
-        self._run(["set", "lcd", "screen", "orientation", str(degrees)])
+        self._set_lcd_screen("orientation", degrees)
 
     def upload_lcd_gif_bucket(self, image_path: str | Path) -> int:
         return int(self._run_with_device(lambda device: upload_gif_bucket(device, image_path)))
@@ -141,6 +166,22 @@ class LiquidctlClient:
 
     def switch_lcd_bucket(self, bucket_index: int) -> None:
         self._run_with_device(lambda device: switch_bucket(device, bucket_index))
+
+    def _set_lcd_screen(self, mode: str, value: object | None = None) -> None:
+        if self._should_run_embedded():
+            self._run_with_device(lambda device: device.set_screen("lcd", mode, value))
+            return
+
+        args = ["set", "lcd", "screen", mode]
+        if value is not None:
+            args.append(str(value))
+        self._run(args)
+
+    def _read_embedded_status(self) -> CoolerStatus:
+        payload = self._run_with_device(
+            lambda device: _device_status_payload(device, device.get_status())
+        )
+        return _status_from_devices([payload])
 
     def _run_json(self, args: list[str]) -> list[dict[str, Any]]:
         out = self._run(args)
@@ -211,21 +252,32 @@ class LiquidctlClient:
 
         with _EMBEDDED_LIQUIDCTL_LOCK:
             install_liquidctl_winusb_fallback()
-
-            from liquidctl.cli import find_liquidctl_devices
-
-            opts = {"match": self.match} if self.match else {}
-            devices = list(find_liquidctl_devices(**opts))
-            if not devices:
-                raise LiquidctlError("No Kraken device found by liquidctl.")
-            if len(devices) > 1:
-                raise LiquidctlError("Multiple Kraken devices found: a more specific filter is required.")
+            device = self._get_embedded_device_unlocked()
 
             try:
-                with devices[0].connect():
-                    return operation(devices[0])
+                with device.connect():
+                    return operation(device)
             except Exception as exc:
                 raise _error_from_message(str(exc) or repr(exc)) from exc
+
+    def _get_embedded_device_unlocked(self) -> Any:
+        if self._embedded_device is not None:
+            return self._embedded_device
+
+        devices = self._find_embedded_devices()
+        if not devices:
+            raise LiquidctlError("No Kraken device found by liquidctl.")
+        if len(devices) > 1:
+            raise LiquidctlError("Multiple Kraken devices found: a more specific filter is required.")
+
+        self._embedded_device = devices[0]
+        return self._embedded_device
+
+    def _find_embedded_devices(self) -> list[Any]:
+        from liquidctl.cli import find_liquidctl_devices
+
+        opts = {"match": self.match} if self.match else {}
+        return list(find_liquidctl_devices(**opts))
 
     def _run_embedded(self, args: list[str]) -> str:
         with _EMBEDDED_LIQUIDCTL_LOCK:

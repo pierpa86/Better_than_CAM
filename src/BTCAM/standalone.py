@@ -46,11 +46,12 @@ def _hardware_test(write_lcd: bool = False) -> int:
         cooler = client.status()
         if write_lcd:
             config = AppConfig.load()
-            snapshot = StatusSnapshot(
-                cooler=cooler,
-                system=SystemSensorReader().read(),
-                captured_at=datetime.now(),
-            )
+            with SystemSensorReader() as sensor_reader:
+                snapshot = StatusSnapshot(
+                    cooler=cooler,
+                    system=sensor_reader.read(),
+                    captured_at=datetime.now(),
+                )
             path = Path(tempfile.gettempdir()) / "btcam-lcd-test.png"
             LcdRenderer(config.display_size, background_path=config.background_image_path).save(snapshot, path)
             client.set_lcd_static(path)

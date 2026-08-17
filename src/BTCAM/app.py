@@ -2058,14 +2058,15 @@ class BTCAMApp(tk.Tk):
 
     def refresh_once(self) -> None:
         try:
-            snapshot = self._provider().read()
+            with self._provider() as provider:
+                snapshot = provider.read()
         except LiquidctlError as exc:
             self.status_var.set(str(exc))
             return
         self._apply_snapshot(snapshot)
 
     def start_loop(self) -> None:
-        if self.worker and self.worker.is_alive():
+        if any(worker is not None and worker.is_alive() for worker in (self.worker, self.upload_worker)):
             return
         self._sync_config_from_ui()
         if not self._validate_carousel_settings():
@@ -2111,6 +2112,8 @@ class BTCAMApp(tk.Tk):
             self.status_var.set("Tray unavailable, window minimized.")
 
     def _exit_application(self) -> None:
+        if self.is_exiting:
+            return
         self.is_exiting = True
         self.stop_event.set()
         self.upload_event.set()
@@ -2124,6 +2127,15 @@ class BTCAMApp(tk.Tk):
         if self.gif_crop_editor_window is not None and self.gif_crop_editor_window.winfo_exists():
             self.gif_crop_editor_window.destroy()
             self.gif_crop_editor_window = None
+        self.withdraw()
+        self._finish_exit_when_workers_stop()
+
+    def _finish_exit_when_workers_stop(self) -> None:
+        current_thread = threading.current_thread()
+        for worker in (self.worker, self.upload_worker):
+            if worker is not None and worker is not current_thread and worker.is_alive():
+                self.after(50, self._finish_exit_when_workers_stop)
+                return
         self.destroy()
 
     def _validate_carousel_settings(self) -> bool:
@@ -2149,30 +2161,32 @@ class BTCAMApp(tk.Tk):
         first = True
         last_cooler: CoolerStatus | None = None
 
-        while not self.stop_event.is_set():
-            cycle_started_at = time.monotonic()
-            try:
-                system = provider.system.read()
-                cooler = provider.client.status_if_idle()
-                if cooler is None:
-                    cooler = last_cooler or CoolerStatus(description="Kraken")
-                else:
-                    last_cooler = cooler
-                snapshot = StatusSnapshot(cooler=cooler, system=system, captured_at=datetime.now())
-                self.queue.put(("snapshot", snapshot))
-                self._publish_snapshot_for_upload(snapshot)
-            except LiquidctlError as exc:
-                self.queue.put(("error", str(exc)))
-                if first:
-                    break
-            first = False
-            elapsed = time.monotonic() - cycle_started_at
-            wait_seconds = max(0.0, interval - elapsed)
-            self.stop_event.wait(wait_seconds)
-
-        self.stop_event.set()
-        self.upload_event.set()
-        self.queue.put(("stopped", None))
+        try:
+            while not self.stop_event.is_set():
+                cycle_started_at = time.monotonic()
+                try:
+                    system = provider.system.read()
+                    cooler = provider.client.status_if_idle()
+                    if cooler is None:
+                        cooler = last_cooler or CoolerStatus(description="Kraken")
+                    else:
+                        last_cooler = cooler
+                    snapshot = StatusSnapshot(cooler=cooler, system=system, captured_at=datetime.now())
+                    self.queue.put(("snapshot", snapshot))
+                    self._publish_snapshot_for_upload(snapshot)
+                except LiquidctlError as exc:
+                    self.queue.put(("error", str(exc)))
+                    if first:
+                        break
+                first = False
+                elapsed = time.monotonic() - cycle_started_at
+                wait_seconds = max(0.0, interval - elapsed)
+                self.stop_event.wait(wait_seconds)
+        finally:
+            provider.close()
+            self.stop_event.set()
+            self.upload_event.set()
+            self.queue.put(("stopped", None))
 
     def _lcd_upload_worker(self) -> None:
         client = self._client()
@@ -2446,11 +2460,21 @@ class BTCAMApp(tk.Tk):
                 elif kind == "error":
                     self.status_var.set(payload)
                 elif kind == "stopped":
-                    self.lcd_toggle_button.configure(text="Start LCD", state="normal", command=self.start_loop)
-                    self._set_carousel_editing_locked(False)
+                    self._finish_loop_stop_when_workers_stop()
         except queue.Empty:
             pass
         self.after(250, self._drain_queue)
+
+    def _finish_loop_stop_when_workers_stop(self) -> None:
+        if any(worker is not None and worker.is_alive() for worker in (self.worker, self.upload_worker)):
+            self.after(50, self._finish_loop_stop_when_workers_stop)
+            return
+        self.worker = None
+        self.upload_worker = None
+        if self.is_exiting:
+            return
+        self.lcd_toggle_button.configure(text="Start LCD", state="normal", command=self.start_loop)
+        self._set_carousel_editing_locked(False)
 
     def _apply_snapshot(self, snapshot: Any) -> None:
         cooler = snapshot.cooler

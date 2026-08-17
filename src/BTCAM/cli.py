@@ -60,21 +60,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "list":
             print(json.dumps(client.list_devices(), indent=2))
         elif args.command == "status":
-            snapshot = SnapshotProvider(args.liquidctl, args.match).read()
+            snapshot = _read_snapshot(args.liquidctl, args.match)
             print(json.dumps(snapshot.to_jsonable(), indent=2))
         elif args.command == "sensor-debug":
-            print(json.dumps(SystemSensorReader(temp_cache_seconds=0).debug_temperatures(), indent=2))
+            with SystemSensorReader(temp_cache_seconds=0) as reader:
+                print(json.dumps(reader.debug_temperatures(), indent=2))
         elif args.command == "initialize":
             print(json.dumps(client.initialize(), indent=2))
         elif args.command == "set-liquid":
             client.set_lcd_liquid()
             print("Display impostato in modalita liquid.")
         elif args.command == "preview":
-            snapshot = simulated_snapshot() if args.simulate else SnapshotProvider(args.liquidctl, args.match).read()
+            snapshot = simulated_snapshot() if args.simulate else _read_snapshot(args.liquidctl, args.match)
             path = LcdRenderer(config.display_size, background_path=args.background).save(snapshot, args.out)
             print(path)
         elif args.command == "push-once":
-            snapshot = simulated_snapshot() if args.simulate else SnapshotProvider(args.liquidctl, args.match).read()
+            snapshot = simulated_snapshot() if args.simulate else _read_snapshot(args.liquidctl, args.match)
             transport = _lcd_transport(args.lcd_transport)
             path = Path(args.out) if args.out else _lcd_output_path(config, transport)
             _save_lcd_image(LcdRenderer(config.display_size, background_path=args.background), snapshot, path, transport)
@@ -119,45 +120,53 @@ def _daemon(args: argparse.Namespace, config: AppConfig) -> int:
     last_lcd_upload_at = 0.0
 
     print(f"Avvio aggiornamento LCD ogni {interval}s. Ctrl+C per uscire.")
-    while running:
-        cycle_started_at = time.monotonic()
-        try:
-            snapshot = provider.read()
-            _save_lcd_image(renderer, snapshot, output_path, lcd_transport)
-            if not args.simulate:
-                now = time.monotonic()
-                if should_upload_lcd(
-                    snapshot,
-                    last_lcd_key,
-                    last_lcd_upload_at,
-                    now,
-                    first,
-                    min_interval=lcd_min_interval,
-                    keepalive_interval=lcd_keepalive,
-                ):
-                    try:
-                        upload_started_at = time.monotonic()
-                        _send_lcd_image(client, output_path, lcd_transport)
-                    except LcdImageTransferError as exc:
-                        print(f"Errore LCD: {exc}", file=sys.stderr)
-                        print("Arrestato: preview generata ma invio immagine LCD non disponibile.")
-                        return 2
-                    last_lcd_key = lcd_update_key(snapshot)
-                    last_lcd_upload_at = time.monotonic()
-                    print(
-                        f"upload={last_lcd_upload_at - upload_started_at:.3f}s "
-                        f"cooldown={lcd_min_interval:.1f}s transport={lcd_transport}"
-                    )
-            liquid = snapshot.cooler.liquid_temp_c
-            label = "--" if liquid is None else f"{int(round(liquid))}C"
-            print(f"{snapshot.captured_at:%H:%M:%S} liquid={label}")
-            first = False
-        except LiquidctlError as exc:
-            print(f"Errore: {exc}", file=sys.stderr)
-        elapsed = time.monotonic() - cycle_started_at
-        time.sleep(max(0.0, interval - elapsed))
+    try:
+        while running:
+            cycle_started_at = time.monotonic()
+            try:
+                snapshot = provider.read()
+                _save_lcd_image(renderer, snapshot, output_path, lcd_transport)
+                if not args.simulate:
+                    now = time.monotonic()
+                    if should_upload_lcd(
+                        snapshot,
+                        last_lcd_key,
+                        last_lcd_upload_at,
+                        now,
+                        first,
+                        min_interval=lcd_min_interval,
+                        keepalive_interval=lcd_keepalive,
+                    ):
+                        try:
+                            upload_started_at = time.monotonic()
+                            _send_lcd_image(client, output_path, lcd_transport)
+                        except LcdImageTransferError as exc:
+                            print(f"Errore LCD: {exc}", file=sys.stderr)
+                            print("Arrestato: preview generata ma invio immagine LCD non disponibile.")
+                            return 2
+                        last_lcd_key = lcd_update_key(snapshot)
+                        last_lcd_upload_at = time.monotonic()
+                        print(
+                            f"upload={last_lcd_upload_at - upload_started_at:.3f}s "
+                            f"cooldown={lcd_min_interval:.1f}s transport={lcd_transport}"
+                        )
+                liquid = snapshot.cooler.liquid_temp_c
+                label = "--" if liquid is None else f"{int(round(liquid))}C"
+                print(f"{snapshot.captured_at:%H:%M:%S} liquid={label}")
+                first = False
+            except LiquidctlError as exc:
+                print(f"Errore: {exc}", file=sys.stderr)
+            elapsed = time.monotonic() - cycle_started_at
+            time.sleep(max(0.0, interval - elapsed))
+    finally:
+        provider.close()
     print("Arrestato.")
     return 0
+
+
+def _read_snapshot(liquidctl_path: str, match: str):
+    with SnapshotProvider(liquidctl_path, match) as provider:
+        return provider.read()
 
 
 def _lcd_timing_test(args: argparse.Namespace, config: AppConfig, client: LiquidctlClient) -> int:

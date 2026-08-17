@@ -27,6 +27,15 @@ class SnapshotProvider:
         system = self.system.read()
         return StatusSnapshot(cooler=cooler, system=system, captured_at=datetime.now())
 
+    def close(self) -> None:
+        self.system.close()
+
+    def __enter__(self) -> SnapshotProvider:
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
+
 
 def simulated_snapshot() -> StatusSnapshot:
     now = datetime.now()

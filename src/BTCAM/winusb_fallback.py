@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import sys
 import time
+from typing import Any, Callable
 
 
 _WINUSB_INTERFACE_GUID = "{dee824ef-729b-4a0e-9c14-b7117d33a817}"
@@ -31,15 +32,7 @@ def install_liquidctl_winusb_fallback() -> None:
     original_send_2023_data_fw2 = kraken3.KrakenZ3._send_2023_data_fw2
 
     def _find_winusb_device(self, vid: int, pid: int, serial: str | None) -> bool:
-        if original_find(self, vid, pid, serial):
-            return True
-
-        path = _find_registry_winusb_path(vid, pid)
-        if not path:
-            return False
-
-        self._btcam_winusb_path = path
-        return True
+        return _find_winusb_device_with_registry_fallback(self, vid, pid, serial, original_find)
 
     def _set_screen(self, channel: str, mode: str, value: object, **kwargs: object) -> object:
         opened = False
@@ -87,6 +80,21 @@ def install_liquidctl_winusb_fallback() -> None:
     kraken3.KrakenZ3._send_data = _send_data
     kraken3.KrakenZ3._send_2023_data_fw2 = _send_2023_data_fw2
     kraken3.KrakenZ3._btcam_winusb_fallback = True
+
+
+def _find_winusb_device_with_registry_fallback(
+    device: Any,
+    vid: int,
+    pid: int,
+    serial: str | None,
+    original_find: Callable[[Any, int, int, str | None], object],
+) -> bool:
+    path = _find_registry_winusb_path(vid, pid)
+    if path:
+        device._btcam_winusb_path = path
+        return True
+
+    return bool(original_find(device, vid, pid, serial))
 
 
 def _ensure_bulk_device_open(device: object, winusb_py: type) -> bool:
